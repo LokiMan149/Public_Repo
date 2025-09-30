@@ -11,16 +11,13 @@ from PIL import Image, ImageOps
 import streamlit as st
 from streamlit_plotly_events import plotly_events
 
-# ---------------- page config ----------------
 st.set_page_config(page_title="Hover PNG Viewer — CSV Tabs", layout="wide")
-
 BASE = Path(__file__).parent
 
 def rel(*parts) -> Path:
     return BASE.joinpath(*parts)
 
 def norm_from_csv(p: str) -> Path:
-    """Make a csv path portable; allow absolute paths too."""
     pp = Path(str(p).replace("\\", "/"))
     return pp if pp.is_absolute() else BASE.joinpath(pp)
 
@@ -40,19 +37,16 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[c] = np.nan
     return df
 
-# ---------- CONFIG: tabs + fixed limits ----------
+# ---------- CONFIG ----------
 TABS: Dict[str, Dict[str, Path]] = {
-    # DAB3_22_eq_results — Lm=10
     "SPS (Lm=10)":   {"csv": rel("data","DAB3_22_eq_results","Lm_10","SPS_Lm10_hover_list.csv")},
     "Buck (Lm=10)":  {"csv": rel("data","DAB3_22_eq_results","Lm_10","Buck_Lm10_hover_list.csv")},
     "Boost (Lm=10)": {"csv": rel("data","DAB3_22_eq_results","Lm_10","Boost_Lm10_hover_list.csv")},
     "TZM (Lm=10)":   {"csv": rel("data","DAB3_22_eq_results","Lm_10","TZM_Lm10_hover_list.csv")},
-    # DAB3_22_eq_results — Lm=1e6
     "SPS (Lm=1e6)":   {"csv": rel("data","DAB3_22_eq_results","Lm_1e+06","SPS_Lm1e+06_hover_list.csv")},
     "Buck (Lm=1e6)":  {"csv": rel("data","DAB3_22_eq_results","Lm_1e+06","Buck_Lm1e+06_hover_list.csv")},
     "Boost (Lm=1e6)": {"csv": rel("data","DAB3_22_eq_results","Lm_1e+06","Boost_Lm1e+06_hover_list.csv")},
     "TZM (Lm=1e6)":   {"csv": rel("data","DAB3_22_eq_results","Lm_1e+06","TZM_Lm1e+06_hover_list.csv")},
-    # LUTs
     "2-2 LUT (Lm=10)":  {"csv": rel("data","DAB3_22_results","Lm_10","2-2 LUT_Lm10_hover_list.csv")},
     "2-2 LUT (Lm=1e6)": {"csv": rel("data","DAB3_22_results","Lm_1e+06","2-2 LUT_Lm1e+06_hover_list.csv")},
     "3-2 LUT (Lm=10)":  {"csv": rel("data","DAB3_32_results","Lm_10","3-2 level_Lm10_hover_list.csv")},
@@ -64,7 +58,6 @@ TABS: Dict[str, Dict[str, Path]] = {
 X_LIM: Tuple[float, float] = (0.0, 1.5)  # d
 Y_LIM: Tuple[float, float] = (0.0, 1.5)  # P_calc
 
-# ------------- plotting helpers -------------
 def build_scatter(df: pd.DataFrame, title: str, pre_x: Optional[float], pre_y: Optional[float]) -> go.Figure:
     df = ensure_columns(df).copy()
 
@@ -76,8 +69,8 @@ def build_scatter(df: pd.DataFrame, title: str, pre_x: Optional[float], pre_y: O
     sec_only = sec_bad & ~pri_bad
     ok = valid & ~(pri_bad | sec_bad)
 
-    def mk(mask, name, color, size=6):
-        dd = df.loc(mask)
+    def mk(mask: pd.Series, name: str, color: str, size: int = 6):
+        dd = df.loc[mask]  # <-- FIX: use brackets, not parentheses
         return go.Scatter(
             x=dd["d"], y=dd["P_calc"],
             mode="markers", name=name,
@@ -94,7 +87,6 @@ def build_scatter(df: pd.DataFrame, title: str, pre_x: Optional[float], pre_y: O
     fig.add_trace(mk(sec_only, "HS_{secondary}", c_sec))
     fig.add_trace(mk(both_bad, "HS both",        c_both))
 
-    # Red preview marker uses session-state coords if available
     px = pre_x if pre_x is not None else np.nan
     py = pre_y if pre_y is not None else np.nan
     fig.add_trace(go.Scatter(
@@ -123,7 +115,6 @@ def draw_preview(png_path: Optional[str]) -> Image.Image:
                 return ImageOps.contain(im, (W, H))
             except Exception:
                 pass
-    # checkerboard
     tile = Image.new("RGB", (16, 16), "white")
     alt  = Image.new("RGB", (16, 16), "black")
     row = Image.new("RGB", (16 * 40, 16))
@@ -134,10 +125,9 @@ def draw_preview(png_path: Optional[str]) -> Image.Image:
         board.paste(row if j % 2 == 0 else ImageOps.invert(row), (0, j * 16))
     return ImageOps.contain(board, (W, H))
 
-# ------------------- UI -------------------
 st.markdown("# Hover PNG Viewer — CSV Tabs")
-
 tab_objs = st.tabs(list(TABS.keys()))
+
 for tab_name, st_tab in zip(TABS.keys(), tab_objs):
     with st_tab:
         csv_path = TABS[tab_name]["csv"]
@@ -148,17 +138,13 @@ for tab_name, st_tab in zip(TABS.keys(), tab_objs):
             st.info("No data to display.")
             continue
 
-        # --- session state per tab ---
         state_key = f"sel_{tab_name}"
         if state_key not in st.session_state:
             st.session_state[state_key] = {"x": None, "y": None, "png": None}
-
         sel = st.session_state[state_key]
 
-        # Build fig with current preview position (single render!)
         fig = build_scatter(df, title="", pre_x=sel["x"], pre_y=sel["y"])
 
-        # One and only interactive render:
         events = plotly_events(
             fig,
             click_event=True,
@@ -168,7 +154,6 @@ for tab_name, st_tab in zip(TABS.keys(), tab_objs):
             key=f"plt_{tab_name}",
         )
 
-        # If user hovers/clicks, remember it and update PNG
         if events:
             ev = events[-1]
             sel["x"] = ev.get("x", sel["x"])
@@ -177,15 +162,12 @@ for tab_name, st_tab in zip(TABS.keys(), tab_objs):
             if isinstance(cd, list) and len(cd) >= 1:
                 sel["png"] = cd[0]
 
-        # Layout: one scatter (left) + preview (right)
         col_scatter, col_png = st.columns((1.05, 1.35), gap="large")
         with col_scatter:
-            # Re-show the SAME component (no second plot)
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
         with col_png:
             st.image(draw_preview(sel["png"]), caption=(Path(sel["png"]).name if sel["png"] else "(no PNG)"))
 
-# footer colors note
 st.markdown(
     "<span style='color:#3373D9;'>Teal</span>: ZVS OK &nbsp; • &nbsp; "
     "<span style='color:#CCCCCC;'>Light grey</span>: HS_primary &nbsp; • &nbsp; "
