@@ -1,4 +1,4 @@
-# app.py — single-plot fix + working PNG preview on hover/click
+# app.py — single Plotly figure (no duplicate), PNG preview updates on hover/click
 
 from __future__ import annotations
 from pathlib import Path
@@ -25,7 +25,11 @@ def load_csv(csv_path: Path) -> pd.DataFrame:
     try:
         df = pd.read_csv(csv_path)
         if "thumb_path" in df.columns:
-            df["thumb_path"] = df["thumb_path"].astype(str).map(lambda s: str(norm_from_csv(s)))
+            df["thumb_path"] = (
+                df["thumb_path"]
+                .astype(str)
+                .map(lambda s: str(norm_from_csv(s)))
+            )
         return df
     except Exception as e:
         st.error(f"Could not load `{csv_path.as_posix()}`\n\n**{e}**")
@@ -37,16 +41,21 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[c] = np.nan
     return df
 
-# ---------- CONFIG ----------
+# -------- CONFIG: tabs & fixed axis limits ----------
 TABS: Dict[str, Dict[str, Path]] = {
+    # DAB3_22_eq_results — Lm=10
     "SPS (Lm=10)":   {"csv": rel("data","DAB3_22_eq_results","Lm_10","SPS_Lm10_hover_list.csv")},
     "Buck (Lm=10)":  {"csv": rel("data","DAB3_22_eq_results","Lm_10","Buck_Lm10_hover_list.csv")},
     "Boost (Lm=10)": {"csv": rel("data","DAB3_22_eq_results","Lm_10","Boost_Lm10_hover_list.csv")},
     "TZM (Lm=10)":   {"csv": rel("data","DAB3_22_eq_results","Lm_10","TZM_Lm10_hover_list.csv")},
+
+    # DAB3_22_eq_results — Lm=1e6
     "SPS (Lm=1e6)":   {"csv": rel("data","DAB3_22_eq_results","Lm_1e+06","SPS_Lm1e+06_hover_list.csv")},
     "Buck (Lm=1e6)":  {"csv": rel("data","DAB3_22_eq_results","Lm_1e+06","Buck_Lm1e+06_hover_list.csv")},
     "Boost (Lm=1e6)": {"csv": rel("data","DAB3_22_eq_results","Lm_1e+06","Boost_Lm1e+06_hover_list.csv")},
     "TZM (Lm=1e6)":   {"csv": rel("data","DAB3_22_eq_results","Lm_1e+06","TZM_Lm1e+06_hover_list.csv")},
+
+    # LUTs (put these files in your repo under data/)
     "2-2 LUT (Lm=10)":  {"csv": rel("data","DAB3_22_results","Lm_10","2-2 LUT_Lm10_hover_list.csv")},
     "2-2 LUT (Lm=1e6)": {"csv": rel("data","DAB3_22_results","Lm_1e+06","2-2 LUT_Lm1e+06_hover_list.csv")},
     "3-2 LUT (Lm=10)":  {"csv": rel("data","DAB3_32_results","Lm_10","3-2 level_Lm10_hover_list.csv")},
@@ -55,6 +64,7 @@ TABS: Dict[str, Dict[str, Path]] = {
     "3-3 LUT (Lm=1e6)": {"csv": rel("data","DAB3_33_results","Lm_1e+06","3-3 level_Lm1e+06_hover_list.csv")},
 }
 
+# Fixed axis limits like your MATLAB call { [0 1.5], [0 1.5] }
 X_LIM: Tuple[float, float] = (0.0, 1.5)  # d
 Y_LIM: Tuple[float, float] = (0.0, 1.5)  # P_calc
 
@@ -70,7 +80,7 @@ def build_scatter(df: pd.DataFrame, title: str, pre_x: Optional[float], pre_y: O
     ok = valid & ~(pri_bad | sec_bad)
 
     def mk(mask: pd.Series, name: str, color: str, size: int = 6):
-        dd = df.loc[mask]  # <-- FIX: use brackets, not parentheses
+        dd = df.loc[mask]  # correct: brackets
         return go.Scatter(
             x=dd["d"], y=dd["P_calc"],
             mode="markers", name=name,
@@ -87,6 +97,7 @@ def build_scatter(df: pd.DataFrame, title: str, pre_x: Optional[float], pre_y: O
     fig.add_trace(mk(sec_only, "HS_{secondary}", c_sec))
     fig.add_trace(mk(both_bad, "HS both",        c_both))
 
+    # preview point (red ring)
     px = pre_x if pre_x is not None else np.nan
     py = pre_y if pre_y is not None else np.nan
     fig.add_trace(go.Scatter(
@@ -115,6 +126,7 @@ def draw_preview(png_path: Optional[str]) -> Image.Image:
                 return ImageOps.contain(im, (W, H))
             except Exception:
                 pass
+    # fallback checkerboard
     tile = Image.new("RGB", (16, 16), "white")
     alt  = Image.new("RGB", (16, 16), "black")
     row = Image.new("RGB", (16 * 40, 16))
@@ -126,8 +138,8 @@ def draw_preview(png_path: Optional[str]) -> Image.Image:
     return ImageOps.contain(board, (W, H))
 
 st.markdown("# Hover PNG Viewer — CSV Tabs")
-tab_objs = st.tabs(list(TABS.keys()))
 
+tab_objs = st.tabs(list(TABS.keys()))
 for tab_name, st_tab in zip(TABS.keys(), tab_objs):
     with st_tab:
         csv_path = TABS[tab_name]["csv"]
@@ -145,26 +157,34 @@ for tab_name, st_tab in zip(TABS.keys(), tab_objs):
 
         fig = build_scatter(df, title="", pre_x=sel["x"], pre_y=sel["y"])
 
-        events = plotly_events(
-            fig,
-            click_event=True,
-            hover_event=True,
-            select_event=False,
-            override_height=640,
-            key=f"plt_{tab_name}",
-        )
+        # Lay out: left = single plot (rendered by plotly_events), right = PNG preview
+        col_plot, col_png = st.columns((1.05, 1.35), gap="large")
 
+        with col_plot:
+            events = plotly_events(
+                fig,
+                click_event=True,
+                hover_event=True,
+                select_event=False,
+                override_height=640,
+                key=f"plt_{tab_name}",
+            )
+
+        # update selection from last event (hover or click)
         if events:
             ev = events[-1]
             sel["x"] = ev.get("x", sel["x"])
             sel["y"] = ev.get("y", sel["y"])
+            # customdata may come as list/np array nested like [["/path.png"]]
             cd = ev.get("customdata", None)
-            if isinstance(cd, list) and len(cd) >= 1:
-                sel["png"] = cd[0]
+            if cd is not None:
+                try:
+                    # list -> first element; ndarray -> index [0]
+                    val = cd[0] if isinstance(cd, (list, tuple, np.ndarray)) else cd
+                    sel["png"] = val
+                except Exception:
+                    pass
 
-        col_scatter, col_png = st.columns((1.05, 1.35), gap="large")
-        with col_scatter:
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
         with col_png:
             st.image(draw_preview(sel["png"]), caption=(Path(sel["png"]).name if sel["png"] else "(no PNG)"))
 
