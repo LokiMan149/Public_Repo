@@ -1,262 +1,247 @@
-# app.py — Streamlit hover PNG viewer (CSV-based) with fixed XY limits & many tabs
-# --------------------------------------------------------------------------------
-# Requires: streamlit, plotly, pandas, pillow, streamlit-plotly-events
-#
-# pip install streamlit==1.37.0 plotly==5.23.0 pandas pillow streamlit-plotly-events
+# app.py
+# Streamlit hover PNG viewer (CSV tabs + fixed xy limits + cross-platform paths)
 
-import os
+from __future__ import annotations
+import io
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple, Optional
 
-import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw
-import plotly.graph_objs as go
-
+import numpy as np
+import plotly.graph_objects as go
+from PIL import Image, ImageOps
 import streamlit as st
 from streamlit_plotly_events import plotly_events
 
 
-# ============== CONFIG: all tabs (CSV paths + labels) =================
-# These are the CSVs produced by your sweep driver.
-# If a CSV is missing, the tab will show a friendly message.
-TABS: Dict[str, Dict[str, str]] = {
+# ------------------- page config -------------------
+st.set_page_config(page_title="Hover PNG Viewer — CSV Tabs", layout="wide")
+
+# ------------------- paths & helpers -------------------
+BASE = Path(__file__).parent  # repo root for relative paths
+
+
+def rel(*parts) -> Path:
+    """Repo-relative path (portable)."""
+    return BASE.joinpath(*parts)
+
+
+def norm_from_csv(p: str) -> Path:
+    """
+    Normalize Windows backslashes coming from CSV and
+    return a repo-relative absolute Path.
+    """
+    # Allow absolute paths too (but prefer repo-relative inputs)
+    pp = Path(p.replace("\\", "/"))
+    if pp.is_absolute():
+        return pp
+    return BASE.joinpath(pp)
+
+
+def load_csv(csv_path: Path) -> pd.DataFrame:
+    """Read a hover CSV; return empty df on failure with reason in session state."""
+    try:
+        df = pd.read_csv(csv_path)
+        # normalize path column if present
+        if "thumb_path" in df.columns:
+            df["thumb_path"] = df["thumb_path"].astype(str).map(lambda s: str(norm_from_csv(s)))
+        return df
+    except Exception as e:
+        st.error(f"Could not load `{csv_path.as_posix()}`\n\n**{e}**")
+        return pd.DataFrame()
+
+
+def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Make sure expected columns exist; create if missing, so the app keeps running."""
+    needed = ["d", "P_calc", "ZVS_pri", "ZVS_sec", "thumb_path"]
+    for c in needed:
+        if c not in df.columns:
+            df[c] = np.nan
+    return df
+
+
+# ------------------- CONFIG: tabs + fixed limits -------------------
+# Keep these relative (forward slashes) so they work on Streamlit Cloud too.
+TABS: Dict[str, Dict[str, Path]] = {
     # DAB3_22_eq_results — Lm=10
-    "SPS (Lm=10)":   {"csv": r"data\DAB3_22_eq_results\Lm_10\SPS_Lm10_hover_list.csv"},
-    "Buck (Lm=10)":  {"csv": r"data\DAB3_22_eq_results\Lm_10\Buck_Lm10_hover_list.csv"},
-    "Boost (Lm=10)": {"csv": r"data\DAB3_22_eq_results\Lm_10\Boost_Lm10_hover_list.csv"},
-    "TZM (Lm=10)":   {"csv": r"data\DAB3_22_eq_results\Lm_10\TZM_Lm10_hover_list.csv"},
+    "SPS (Lm=10)":   {"csv": rel("data", "DAB3_22_eq_results", "Lm_10",   "SPS_Lm10_hover_list.csv")},
+    "Buck (Lm=10)":  {"csv": rel("data", "DAB3_22_eq_results", "Lm_10",   "Buck_Lm10_hover_list.csv")},
+    "Boost (Lm=10)": {"csv": rel("data", "DAB3_22_eq_results", "Lm_10",   "Boost_Lm10_hover_list.csv")},
+    "TZM (Lm=10)":   {"csv": rel("data", "DAB3_22_eq_results", "Lm_10",   "TZM_Lm10_hover_list.csv")},
 
     # DAB3_22_eq_results — Lm=1e6
-    "SPS (Lm=1e6)":   {"csv": r"data\DAB3_22_eq_results\Lm_1e+06\SPS_Lm1e+06_hover_list.csv"},
-    "Buck (Lm=1e6)":  {"csv": r"data\DAB3_22_eq_results\Lm_1e+06\Buck_Lm1e+06_hover_list.csv"},
-    "Boost (Lm=1e6)": {"csv": r"data\DAB3_22_eq_results\Lm_1e+06\Boost_Lm1e+06_hover_list.csv"},
-    "TZM (Lm=1e6)":   {"csv": r"data\DAB3_22_eq_results\Lm_1e+06\TZM_Lm1e+06_hover_list.csv"},
+    "SPS (Lm=1e6)":   {"csv": rel("data", "DAB3_22_eq_results", "Lm_1e+06", "SPS_Lm1e+06_hover_list.csv")},
+    "Buck (Lm=1e6)":  {"csv": rel("data", "DAB3_22_eq_results", "Lm_1e+06", "Buck_Lm1e+06_hover_list.csv")},
+    "Boost (Lm=1e6)": {"csv": rel("data", "DAB3_22_eq_results", "Lm_1e+06", "Boost_Lm1e+06_hover_list.csv")},
+    "TZM (Lm=1e6)":   {"csv": rel("data", "DAB3_22_eq_results", "Lm_1e+06", "TZM_Lm1e+06_hover_list.csv")},
 
     # LUTs from different folders
-    "2-2 LUT (Lm=10)":  {"csv": r"data\DAB3_22_results\Lm_10\3-3 level_Lm10_hover_list.csv"},
-    "2-2 LUT (Lm=1e6)": {"csv": r"data\DAB3_22_results\Lm_1e+06\3-3 level_Lm1e+06_hover_list.csv"},
+    "2-2 LUT (Lm=10)":  {"csv": rel("data", "DAB3_22_results", "Lm_10",   "2-2 LUT_Lm10_hover_list.csv")},
+    "2-2 LUT (Lm=1e6)": {"csv": rel("data", "DAB3_22_results", "Lm_1e+06","2-2 LUT_Lm1e+06_hover_list.csv")},
 
-    "3-2 LUT (Lm=10)":  {"csv": r"data\DAB3_32_results\Lm_10\3-3 level_Lm10_hover_list.csv"},
-    "3-2 LUT (Lm=1e6)": {"csv": r"data\DAB3_32_results\Lm_1e+06\3-3 level_Lm1e+06_hover_list.csv"},
+    "3-2 LUT (Lm=10)":  {"csv": rel("data", "DAB3_32_results", "Lm_10",   "3-2 level_Lm10_hover_list.csv")},
+    "3-2 LUT (Lm=1e6)": {"csv": rel("data", "DAB3_32_results", "Lm_1e+06","3-2 level_Lm1e+06_hover_list.csv")},
 
-    "3-3 LUT (Lm=10)":  {"csv": r"data\DAB3_33_results\Lm_10\3-3 level_Lm10_hover_list.csv"},
-    "3-3 LUT (Lm=1e6)": {"csv": r"data\DAB3_33_results\Lm_1e+06\3-3 level_Lm1e+06_hover_list.csv"},
+    "3-3 LUT (Lm=10)":  {"csv": rel("data", "DAB3_33_results", "Lm_10",   "3-3 level_Lm10_hover_list.csv")},
+    "3-3 LUT (Lm=1e6)": {"csv": rel("data", "DAB3_33_results", "Lm_1e+06","3-3 level_Lm1e+06_hover_list.csv")},
 }
 
-# Fixed axes limits (like your MATLAB call { [0 1.5], [0 1.5] })
-X_LIM = (0.0, 1.5)   # d
-Y_LIM = (0.0, 1.5)   # P_calc
+# Fixed axes limits (like your MATLAB call: { [0 1.5], [0 1.5] })
+X_LIM: Tuple[float, float] = (0.0, 1.5)   # d
+Y_LIM: Tuple[float, float] = (0.0, 1.5)   # P_calc
 
 
-# ============== Helpers ==============
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+# ------------------- plot builder -------------------
+def build_scatter(df: pd.DataFrame, title: str) -> go.Figure:
     """
-    Make sure we have consistent column names:
-      - d: 'd'
-      - P_calc: prefer 'P_calc', else 'P', else 'Pset' as fallback
-      - ZVS flags: 'ZVS_pri', 'ZVS_sec'
-      - thumb path: 'thumb_path'
+    Make the left scatter with categories:
+      OK (both ZVS), HS_primary, HS_secondary, HS both (charcoal).
     """
-    cols = {c.lower(): c for c in df.columns}
-    # d
-    dcol = None
-    for name in ['d', 'd_vec', 'dval', 'gain', 'duty']:
-        if name in cols:
-            dcol = cols[name]; break
-    # P_calc
-    pcol = None
-    for name in ['p_calc', 'pcalc', 'p', 'p_set', 'pset', 'p_req']:
-        if name in cols:
-            pcol = cols[name]; break
-    # ZVS flags
-    zpri = None
-    for name in ['zvs_pri', 'zvspri', 'zpri']:
-        if name in cols: zpri = cols[name]; break
-    zsec = None
-    for name in ['zvs_sec', 'zvssec', 'zsec']:
-        if name in cols: zsec = cols[name]; break
-    # thumb path
-    tcol = None
-    for name in ['thumb_path', 'thumb', 'png', 'png_path', 'image', 'image_path']:
-        if name in cols: tcol = cols[name]; break
+    df = ensure_columns(df).copy()
 
-    needed = [dcol, pcol, zpri, zsec, tcol]
-    if any(v is None for v in needed):
-        missing = []
-        if dcol  is None: missing.append('d')
-        if pcol  is None: missing.append('P_calc (or P/Pset)')
-        if zpri  is None: missing.append('ZVS_pri')
-        if zsec  is None: missing.append('ZVS_sec')
-        if tcol  is None: missing.append('thumb_path')
-        raise ValueError(f"CSV missing columns: {', '.join(missing)}")
+    # Mask categories
+    valid = df["d"].notna() & df["P_calc"].notna()
+    pri_bad = (df["ZVS_pri"] == 0) & valid
+    sec_bad = (df["ZVS_sec"] == 0) & valid
+    both_bad = pri_bad & sec_bad
+    pri_only = pri_bad & ~sec_bad
+    sec_only = sec_bad & ~pri_bad
+    ok = valid & ~(pri_bad | sec_bad)
 
-    out = pd.DataFrame({
-        'd': df[dcol].astype(float),
-        'P_calc': df[pcol].astype(float),
-        'ZVS_pri': df[zpri].astype(float),
-        'ZVS_sec': df[zsec].astype(float),
-        'thumb_path': df[tcol].astype(str),
-    })
-    return out
-
-
-def load_csv_safe(path: str) -> Optional[pd.DataFrame]:
-    try:
-        df = pd.read_csv(path)
-        return normalize_columns(df)
-    except Exception as e:
-        st.info(f"Could not load **{path}**\n\n> {e}")
-        return None
-
-
-def split_masks(df: pd.DataFrame):
-    """Return boolean masks for OK / HS_primary / HS_secondary / both."""
-    pri_bad = df['ZVS_pri'] == 0
-    sec_bad = df['ZVS_sec'] == 0
-    both    = pri_bad & sec_bad
-    pri     = pri_bad & ~sec_bad
-    sec     = sec_bad & ~pri_bad
-    ok      = ~(pri | sec | both)
-    return ok, pri, sec, both
-
-
-def blank_image(w=960, h=720) -> Image.Image:
-    img = Image.new("RGB", (w, h), (245, 245, 245))
-    d = ImageDraw.Draw(img)
-    d.text((16, 16), "Click a point to preview the PNG", fill=(60, 60, 60))
-    return img
-
-
-def build_left_plot(df: pd.DataFrame, highlight_idx: Optional[int] = None) -> go.Figure:
-    """Plot P_calc vs d with color groups and optional highlighted point."""
-    ok, pri, sec, both = split_masks(df)
+    # Helper to create a trace
+    def trace(mask, name, color, marker_size=6):
+        dd = df.loc[mask]
+        return go.Scatter(
+            x=dd["d"], y=dd["P_calc"],
+            mode="markers",
+            name=name,
+            marker=dict(color=color, size=marker_size, opacity=0.7),
+            customdata=np.stack([dd.get("thumb_path", pd.Series([""] * len(dd)))], axis=1),
+            hovertemplate="d=%{x:.4g}<br>P=%{y:.4g}<extra></extra>",
+        )
 
     fig = go.Figure()
 
-    # Teal OK
-    fig.add_trace(go.Scattergl(
-        x=df.loc[ok, 'd'], y=df.loc[ok, 'P_calc'],
-        mode='markers', name='ZVS (both)',
-        marker=dict(size=7, color='rgb(51,115,217)'),
-        hovertemplate='d=%{x:.4g}<br>P=%{y:.4g}<extra></extra>',
-    ))
-    # light grey HS_primary
-    fig.add_trace(go.Scattergl(
-        x=df.loc[pri, 'd'], y=df.loc[pri, 'P_calc'],
-        mode='markers', name='HS_{primary}',
-        marker=dict(size=7, color='rgb(204,204,204)'),
-        hovertemplate='d=%{x:.4g}<br>P=%{y:.4g}<extra></extra>',
-    ))
-    # dark grey HS_secondary
-    fig.add_trace(go.Scattergl(
-        x=df.loc[sec, 'd'], y=df.loc[sec, 'P_calc'],
-        mode='markers', name='HS_{secondary}',
-        marker=dict(size=7, color='rgb(102,102,102)'),
-        hovertemplate='d=%{x:.4g}<br>P=%{y:.4g}<extra></extra>',
-    ))
-    # charcoal both
-    fig.add_trace(go.Scattergl(
-        x=df.loc[both, 'd'], y=df.loc[both, 'P_calc'],
-        mode='markers', name='HS both',
-        marker=dict(size=8, color='rgb(26,26,26)'),
-        hovertemplate='d=%{x:.4g}<br>P=%{y:.4g}<extra></extra>',
-    ))
+    # Colors matching your MATLAB scheme
+    c_ok   = "rgb(51,115,217)"   # teal-ish blue
+    c_pri  = "rgb(204,204,204)"  # light grey
+    c_sec  = "rgb(102,102,102)"  # dark grey
+    c_both = "rgb(25,25,25)"     # charcoal
 
-    # Optional highlighted point (preview)
-    if highlight_idx is not None and 0 <= highlight_idx < len(df):
-        fig.add_trace(go.Scattergl(
-            x=[df.loc[highlight_idx, 'd']], y=[df.loc[highlight_idx, 'P_calc']],
-            mode='markers', name='(Preview)',
-            marker=dict(size=12, symbol='circle-open', line=dict(width=2, color='red')),
-            hoverinfo='skip'
-        ))
+    fig.add_trace(trace(ok,       "ZVS (both)",    c_ok))
+    fig.add_trace(trace(pri_only, "HS_{primary}",  c_pri))
+    fig.add_trace(trace(sec_only, "HS_{secondary}",c_sec))
+    fig.add_trace(trace(both_bad, "HS both",       c_both))
+
+    # Preview point (red), initially hidden (NaNs)
+    fig.add_trace(go.Scatter(
+        x=[np.nan], y=[np.nan],
+        mode="markers",
+        name="(Preview)",
+        marker=dict(color="rgb(214,69,65)", size=8, line=dict(width=1, color="black")),
+        hoverinfo="skip",
+    ))
 
     fig.update_layout(
-        xaxis=dict(title='d', range=[X_LIM[0], X_LIM[1]], constrain='domain'),
-        yaxis=dict(title='P_{calc}', range=[Y_LIM[0], Y_LIM[1]]),
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
-        margin=dict(l=10, r=10, t=10, b=10),
-        dragmode='lasso',
-        height=520,
+        title=title,
+        xaxis=dict(title="d", range=X_LIM),
+        yaxis=dict(title="P_{calc}", range=Y_LIM),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=10, r=10, t=30, b=10),
+        height=640,
     )
     return fig
 
 
-def pick_clicked_index(clicks, df: pd.DataFrame) -> Optional[int]:
-    """
-    Convert plotly click result to dataframe index.
-    We match on (x,y) to nearest row.
-    """
-    if not clicks:
-        return None
-    p = clicks[0]
-    if 'x' not in p or 'y' not in p:
-        return None
-    x, y = p['x'], p['y']
-    # nearest row in euclidean distance
-    arr = (df['d'].to_numpy() - x) ** 2 + (df['P_calc'].to_numpy() - y) ** 2
-    idx = int(np.argmin(arr))
-    return idx
+def update_preview_marker(fig: go.Figure, x: float, y: float) -> go.Figure:
+    """Move the red '(Preview)' marker to (x,y)."""
+    # Red marker is the last trace
+    fig.data[-1].x = [x]
+    fig.data[-1].y = [y]
+    return fig
 
 
-def show_right_preview(df: pd.DataFrame, idx: Optional[int]):
-    st.markdown("**Preview**")
-    if idx is None:
-        st.image(blank_image(), use_container_width=True)
-        return
-    pth = df.loc[idx, 'thumb_path']
-    if isinstance(pth, str) and len(pth) > 0 and os.path.isfile(pth):
-        try:
-            st.image(pth, use_container_width=True)
-            st.caption(os.path.basename(pth))
-        except Exception as e:
-            st.image(blank_image(), use_container_width=True)
-            st.info(f"Failed to open image:\n\n> {e}")
-    else:
-        st.image(blank_image(), use_container_width=True)
-        st.info("No PNG found for this point.")
+# ------------------- preview image -------------------
+def draw_preview(png_path: Optional[str]) -> Image.Image:
+    """Open a PNG; return a checkerboard placeholder if not available."""
+    W, H = 1280, 800  # preview canvas
+    if png_path:
+        p = norm_from_csv(png_path)
+        if p.is_file():
+            try:
+                im = Image.open(p).convert("RGB")
+                im = ImageOps.contain(im, (W, H))
+                return im
+            except Exception:
+                pass
+    # Checkerboard fallback
+    tile = Image.new("RGB", (16, 16), "white")
+    alt = Image.new("RGB", (16, 16), "black")
+    row = Image.new("RGB", (16 * 40, 16))
+    for i in range(40):
+        row.paste(tile if i % 2 == 0 else alt, (i * 16, 0))
+    board = Image.new("RGB", (16 * 40, 16 * 25))
+    for j in range(25):
+        board.paste(row if j % 2 == 0 else ImageOps.invert(row), (0, j * 16))
+    return ImageOps.contain(board, (W, H))
 
 
-# ============== App ==============
-
-st.set_page_config(page_title="Hover PNG Viewer (CSV)", layout="wide")
-st.title("Hover PNG Viewer — CSV Tabs")
-
-# Keep selected index per tab in session_state
-if 'sel_idx' not in st.session_state:
-    st.session_state['sel_idx'] = {}
+# ------------------- UI -------------------
+st.markdown("# Hover PNG Viewer — CSV Tabs")
 
 tab_objs = st.tabs(list(TABS.keys()))
+for tab_name, st_tab in zip(TABS.keys(), tab_objs):
+    with st_tab:
+        csv_path = TABS[tab_name]["csv"]
+        st.caption(f"`{csv_path.as_posix()}`")
 
-for tab_name, tab in zip(TABS.keys(), tab_objs):
-    with tab:
-        csv_path = TABS[tab_name]['csv']
-        st.write(f"`{csv_path}`")
-
-        df = load_csv_safe(csv_path)
-        if df is None or df.empty:
-            st.warning("No data to display.")
+        df = load_csv(csv_path)
+        if df.empty:
+            st.info("No data to display.")
             continue
 
-        # Apply fixed XY limits by filtering to the visible window (optional; still plot full but limits fixed)
-        # Not filtering to keep full dataset; limits are enforced in the figure.
+        fig = build_scatter(df, title="")
+        # Handle plotly hover/click events
+        #   - hover_event = {"x":..., "y":..., "curveNumber":..., "pointNumber":..., "customdata":[thumb_path]}
+        events = plotly_events(
+            fig,
+            click_event=True,
+            hover_event=True,
+            select_event=False,
+            override_height=640,
+            override_width=None,
+            key=f"plt_{tab_name}",
+        )
 
-        # current selected index for this tab
-        sel_idx = st.session_state['sel_idx'].get(tab_name)
+        # Pick last event (hover prioritized over click if both)
+        png_to_show = None
+        px = py = None
+        if events:
+            ev = events[-1]
+            px = ev.get("x", None)
+            py = ev.get("y", None)
+            cd = ev.get("customdata", None)
+            if isinstance(cd, list) and len(cd) >= 1:
+                png_to_show = cd[0]
 
-        c1, c2 = st.columns([0.55, 0.45], gap="large")
+        # Move the red preview marker on the client plot
+        if px is not None and py is not None:
+            fig = update_preview_marker(fig, px, py)
 
-        with c1:
-            fig = build_left_plot(df, highlight_idx=sel_idx)
-            clicks = plotly_events(fig, click_event=True, hover_event=False, select_event=False, override_height=520, override_width="100%")
-            new_idx = pick_clicked_index(clicks, df)
-            if new_idx is not None:
-                st.session_state['sel_idx'][tab_name] = new_idx
-                sel_idx = new_idx
+        col_scatter, col_png = st.columns((1.05, 1.35), gap="large")
+        with col_scatter:
+            # re-render with red marker update (no events capture)
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-        with c2:
-            show_right_preview(df, sel_idx)
+        with col_png:
+            st.image(draw_preview(png_to_show), caption=Path(png_to_show).name if png_to_show else "(no PNG)")
 
-st.caption("Teal: ZVS OK • Light grey: HS_primary • Dark grey: HS_secondary • Charcoal: both • Red ring: (Preview)")
+# ------------- footer legend (colors) -------------
+st.markdown(
+    "<span style='color:#3373D9;'>Teal</span>: ZVS OK &nbsp; • &nbsp; "
+    "<span style='color:#CCCCCC;'>Light grey</span>: HS_primary &nbsp; • &nbsp; "
+    "<span style='color:#666666;'>Dark grey</span>: HS_secondary &nbsp; • &nbsp; "
+    "<span style='color:#191919;'>Charcoal</span>: both &nbsp; • &nbsp; "
+    "<span style='color:#D64541;'>Red ring</span>: (Preview)",
+    unsafe_allow_html=True,
+)
